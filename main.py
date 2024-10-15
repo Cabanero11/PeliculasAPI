@@ -1,12 +1,20 @@
 from fastapi import FastAPI
 from enum import Enum
 from datetime import date
-from fastapi import HTTPException
+from fastapi import HTTPException, Path, Query, Depends
 
 from pydantic import BaseModel
+from typing import Annotated
+from contextlib import asynccontextmanager
+
+from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 # Crear la app
-app = FastAPI()
+app = FastAPI(
+    title='Simple Movies API',
+    description='Movies API about Movies',
+    version='0.1.0',
+)
 
 # Ejecutar con uvicorn main:app --reload
 # Ver en http://127.0.0.1:8000/docs
@@ -15,6 +23,8 @@ app = FastAPI()
 # Clases para definir las Peliculas
 
 class Genero(Enum):
+    """ Genero de las peliculas """
+
     TERROR = 'terror'
     ACCION = 'accion'
     DRAMA = 'drama'
@@ -23,12 +33,12 @@ class Genero(Enum):
     CIENCIA_FICCION = 'ciencia_ficcion'
     MUSICAL = 'musical'
 
-
-class Pelicula(BaseModel):
-    id: int
-    nombre: str
-    duracion: int
-    fecha_lanzamiento: date
+# Pelicula pasa de BaseModel a SQLModel
+class Pelicula(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    nombre: str = Field(index=True)
+    duracion: int = Field(index=True)
+    fecha_lanzamiento: date = Field(index=True)
     genero: Genero
 
 
@@ -41,11 +51,51 @@ peliculas = {
     2: Pelicula(id=2, nombre='Oppenheimer', duracion=180, fecha_lanzamiento=date(2023, 7, 21), genero=Genero.DRAMA),
 }
 
+
 # Para poder hacer querys tipo, /peliculas?duracion=120
 # Permite varios tipos
 Selection = dict[
     str, int | str | date | Genero | None
 ]
+
+
+# Crear Objeto Engine, que se conecta con la DB
+
+sqlite_file_name = "database.db"
+sqlite_url = f"sqlite:///{sqlite_file_name}"
+
+connect_args = {"check_same_thread": False}
+engine = create_engine(sqlite_url, connect_args=connect_args)
+
+# Crear Tablas y la DB
+def crear_db_y_tablas():
+    SQLModel.metadata.create_all(engine)
+
+
+
+# @app.on_event("startup") esta deprecado, 
+# hay que usar 'lifespan'
+# o probar, add_event_handler
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print('Startup, creando la DB y Tablas ...')
+    crear_db_y_tablas()  
+    yield
+    print('Shutdown ...')
+
+# Ponerle ciclo de vida a la app
+app = FastAPI(lifespan=lifespan)
+
+
+# Sesion, es la que mantiene los datos en memoria
+def get_session():
+    with Session(engine) as session:
+        yield session
+
+
+SessionDep = Annotated[Session, Depends(get_session)]
+
+
 
 # FastAPI, se encarga del JSON
 # Pydantic tipos, dict[int, Pelicula]
@@ -101,7 +151,7 @@ def get_peliculas_por_parametro(
 @app.post("/")
 def añadir_peli(pelicula: Pelicula) -> dict[str, Pelicula]:
     if pelicula.id in peliculas:
-        HTTPException(status_code=400, detail=f'Pelicula con {pelicula.id} ya existe.')
+        raise HTTPException(status_code=400, detail=f'Pelicula con {pelicula.id} ya existe.')
 
     peliculas[pelicula.id] = pelicula
     return {'añadir': pelicula}
@@ -109,13 +159,16 @@ def añadir_peli(pelicula: Pelicula) -> dict[str, Pelicula]:
 # Actualizar datos de una pelicula
 @app.put('/actualizar/{pelicula_id}')
 def actualizar(
-    id: int,
-    nombre: str | None = None, 
+    # Con path puedo indicar que sea mayor que 0 (greater than) -> gt
+    id: int = Path(gt=0),
+    # Con query puedo pedir mas cosas
+    nombre: str | None = Query(default=None, min_length=1, max_length=40),
     duracion: int | None = None,  
-    fecha_lanzamiento: date | None = None,  
+    fecha_lanzamiento: date | None = None,
+    genero: Genero | None = None,  
     ):
     if id not in peliculas:
-        HTTPException(status_code=404, detail=f'Pelicula con id: {id} ya existe.')
+        raise HTTPException(status_code=404, detail=f'Pelicula con id: {id} ya existe.')
     
     if all(data is None for data in (nombre, duracion, fecha_lanzamiento)):
         raise HTTPException(status_code=400, detail='No se han proporcionado parametros.')
@@ -131,6 +184,9 @@ def actualizar(
 
     if fecha_lanzamiento is not None:
         pelicula.fecha_lanzamiento = fecha_lanzamiento
+    
+    if genero is not None:
+        pelicula.genero = genero
 
     return {'actualizar': pelicula}
 
@@ -144,3 +200,20 @@ def añadir_peli(pelicula_id: int) -> dict[str, Pelicula]:
     # Borrar y guardar para mostrar
     pelicula = peliculas.pop(pelicula_id)
     return {'borrar': pelicula}
+
+
+
+## NUEVAS FUNCIONES TRAS LIFESPAN
+## Y CON SQLITE
+
+@app.get('/db')
+def get_peliculas(session: SessionDep):
+    peliculas = session.exec(select(Pelicula)).all()
+    return peliculas
+
+@app.post('/db')
+def añadir_pelicula(pelicula: Pelicula, session: SessionDep):
+    session.add(pelicula)
+    session.commit()
+    session.refresh(pelicula)
+    return pelicula
