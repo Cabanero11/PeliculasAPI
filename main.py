@@ -59,41 +59,8 @@ Selection = dict[
 ]
 
 
-# Crear Objeto Engine, que se conecta con la DB
-
-sqlite_file_name = "database.db"
-sqlite_url = f"sqlite:///{sqlite_file_name}"
-
-connect_args = {"check_same_thread": False}
-engine = create_engine(sqlite_url, connect_args=connect_args)
-
-# Crear Tablas y la DB
-def crear_db_y_tablas():
-    SQLModel.metadata.create_all(engine)
 
 
-
-# @app.on_event("startup") esta deprecado, 
-# hay que usar 'lifespan'
-# o probar, add_event_handler
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    print('Startup, creando la DB y Tablas ...')
-    crear_db_y_tablas()  
-    yield
-    print('Shutdown ...')
-
-# Ponerle ciclo de vida a la app
-app = FastAPI(lifespan=lifespan)
-
-
-# Sesion, es la que mantiene los datos en memoria
-def get_session():
-    with Session(engine) as session:
-        yield session
-
-
-SessionDep = Annotated[Session, Depends(get_session)]
 
 
 
@@ -200,20 +167,3 @@ def añadir_peli(pelicula_id: int) -> dict[str, Pelicula]:
     # Borrar y guardar para mostrar
     pelicula = peliculas.pop(pelicula_id)
     return {'borrar': pelicula}
-
-
-
-## NUEVAS FUNCIONES TRAS LIFESPAN
-## Y CON SQLITE
-
-@app.get('/db')
-def get_peliculas(session: SessionDep):
-    peliculas = session.exec(select(Pelicula)).all()
-    return peliculas
-
-@app.post('/db')
-def añadir_pelicula(pelicula: Pelicula, session: SessionDep):
-    session.add(pelicula)
-    session.commit()
-    session.refresh(pelicula)
-    return pelicula
